@@ -19,6 +19,20 @@ impl Item {
             n_visits: 0,
         }
     }
+
+    #[getter]
+    fn name(&mut self) -> &str {
+        self.n_visits += 1;
+
+        self.name.as_str()
+    }
+
+    #[getter]
+    fn price(&mut self) -> u64 {
+        self.n_visits += 1;
+
+        self.price
+    }
 }
 
 #[pymodule]
