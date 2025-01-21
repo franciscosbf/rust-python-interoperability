@@ -1,4 +1,65 @@
-use pyo3::{prelude::*, types::PySet};
+use std::{sync::Arc, thread};
+
+use dashmap::DashMap;
+use pyo3::{exceptions::PyValueError, prelude::*, types::PySet};
+use scraper::{Html, Selector};
+use url::Url;
+
+fn scrape(url: Url, visited: &DashMap<Url, bool>) -> Option<Vec<Url>> {
+    let mut base = url.clone();
+    base.set_query(None);
+    base.set_fragment(None);
+
+    if visited.contains_key(&base) {
+        return None;
+    }
+
+    let body = ureq::get(url.as_str())
+        .call()
+        .ok()
+        .or_else(|| {
+            visited.insert(base.clone(), false);
+            None
+        })?
+        .into_string()
+        .ok()
+        .or_else(|| {
+            visited.insert(base.clone(), false);
+            None
+        })?;
+
+    visited.insert(base.clone(), true);
+
+    base.set_path("");
+
+    let fragment = Html::parse_fragment(&body);
+
+    let hyperlinks = fragment
+        .select(&Selector::parse("a").unwrap())
+        .filter_map(|a| a.attr("href"))
+        .chain(
+            fragment
+                .select(&Selector::parse("img").unwrap())
+                .filter_map(|img| img.attr("src")),
+        )
+        .filter(|path| path.starts_with("/"))
+        .filter_map(|path| {
+            let hyperlink = base.join(path).ok()?;
+
+            let mut hscraped = hyperlink.clone();
+            hscraped.set_query(None);
+            hscraped.set_fragment(None);
+
+            (!visited.contains_key(&hscraped)).then_some(hyperlink)
+        })
+        .collect::<Vec<_>>();
+
+    if hyperlinks.is_empty() {
+        None
+    } else {
+        Some(hyperlinks)
+    }
+}
 
 #[pyfunction]
 /// Given a starting URL (`start_from`), discover all the URLs *on the same domain*
@@ -43,8 +104,91 @@ use pyo3::{prelude::*, types::PySet};
 ///
 /// Feel free to pull in any other crates you think might be useful.
 /// If your approach is channel-based, you might want to use the `crossbeam` crate too.
-pub fn site_map(start_from: String, site_map: Bound<'_, PySet>) {
-    todo!()
+pub fn site_map(py: Python<'_>, start_from: String, site_map: Bound<'_, PySet>) -> PyResult<()> {
+    let visited = Arc::new(DashMap::new());
+
+    py.allow_threads(|| {
+        let start_from =
+            Url::parse(&start_from).map_err(|_| PyValueError::new_err("invalid url"))?;
+
+        let urls = if let Some(batch) = scrape(start_from, &visited) {
+            batch
+        } else {
+            return Ok(());
+        };
+
+        let nw = thread::available_parallelism()
+            .map(|nw| nw.get())
+            .unwrap_or(1);
+
+        let (distribute_sender, distribute_receiver) =
+            crossbeam::channel::unbounded::<Option<Vec<Url>>>();
+
+        let mut scrape_senders = vec![];
+        let mut scrape_receivers = vec![];
+        for _ in 0..nw {
+            let (sender, receiver) = crossbeam::channel::unbounded::<Option<Url>>();
+            scrape_senders.push(sender);
+            scrape_receivers.push(receiver);
+        }
+
+        let dt = thread::spawn(move || {
+            let mut batch = urls;
+            let mut pending = batch.len();
+            loop {
+                let mut wi = 0;
+                while let Some(url) = batch.pop() {
+                    let _ = scrape_senders[wi].send(Some(url));
+                    wi = (wi + 1) % nw;
+                }
+
+                loop {
+                    let urls = distribute_receiver.recv().unwrap();
+                    pending -= 1;
+                    match urls {
+                        Some(urls) => {
+                            batch = urls;
+                            pending += batch.len();
+                            break;
+                        }
+                        None if pending == 0 => {
+                            scrape_senders.iter().for_each(|w| w.send(None).unwrap());
+                            return;
+                        }
+                        None => continue,
+                    }
+                }
+            }
+        });
+
+        let mut ts = vec![dt];
+        for scrape_receiver in scrape_receivers {
+            let cvisited = visited.clone();
+            let cdistribute_sender = distribute_sender.clone();
+
+            let wt = thread::spawn(move || {
+                while let Some(url) = scrape_receiver.recv().unwrap() {
+                    cdistribute_sender.send(scrape(url, &cvisited)).unwrap();
+                }
+            });
+
+            ts.push(wt);
+        }
+
+        for t in ts {
+            let _ = t.join();
+        }
+
+        PyResult::Ok(())
+    })?;
+
+    for pair in visited.iter() {
+        if *pair.value() {
+            site_map.add(pair.key().to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[pymodule]

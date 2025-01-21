@@ -1,3 +1,5 @@
+use std::thread;
+
 use pyo3::{prelude::*, types::PyString};
 
 /// Use `std::thread::scope` to spawn `n_threads` threads to count words in parallel.
@@ -20,7 +22,17 @@ fn word_count(text: Bound<'_, PyString>, n_threads: usize) -> PyResult<usize> {
     // directly as an argument, to avoid an extra copy of the string
     let text = text.to_str()?;
 
-    todo!()
+    thread::scope(|s| {
+        let count = split_into_chunks(text, n_threads)
+            .iter()
+            .map(|c| s.spawn(|| word_count_chunk(c)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|w| w.join().unwrap())
+            .sum();
+
+        Ok(count)
+    })
 }
 
 /// Count words in a single chunk of text.

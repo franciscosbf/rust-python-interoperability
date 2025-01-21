@@ -1,9 +1,15 @@
 use pyo3::prelude::*;
 
-#[pyclass]
+#[pyclass(frozen)]
 struct Rectangle {
     width: u32,
     length: u32,
+}
+
+impl Rectangle {
+    fn area(&self) -> u32 {
+        self.width * self.length
+    }
 }
 
 #[pymethods]
@@ -24,10 +30,8 @@ impl Rectangle {
 /// Do NOT remove the `allow_threads` call. The computation must be done inside
 /// the closure passed to `allow_threads`.
 fn compute_area<'py>(python: Python<'py>, shape: Bound<'py, Rectangle>) -> u32 {
-    python.allow_threads(|| {
-        let area: u32 = todo!();
-        area
-    })
+    let shape = shape.unbind();
+    python.allow_threads(|| shape.get().area())
 }
 
 #[pymodule]
