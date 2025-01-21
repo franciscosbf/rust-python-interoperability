@@ -14,21 +14,21 @@ fn scrape(url: Url, visited: &DashMap<Url, bool>) -> Option<Vec<Url>> {
         return None;
     }
 
-    let body = ureq::get(url.as_str())
-        .call()
-        .ok()
-        .or_else(|| {
-            visited.insert(base.clone(), false);
-            None
-        })?
-        .into_string()
-        .ok()
-        .or_else(|| {
-            visited.insert(base.clone(), false);
-            None
-        })?;
+    let res = ureq::get(url.as_str()).call().ok().or_else(|| {
+        visited.insert(base.clone(), false);
+        None
+    })?;
 
     visited.insert(base.clone(), true);
+
+    if res.content_type() != "text/html" {
+        return None;
+    }
+
+    let body = res.into_string().ok().or_else(|| {
+        visited.insert(base.clone(), false);
+        None
+    })?;
 
     base.set_path("");
 
@@ -195,4 +195,25 @@ pub fn site_map(py: Python<'_>, start_from: String, site_map: Bound<'_, PySet>) 
 fn outro3(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(site_map, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use pyo3::prepare_freethreaded_python;
+
+    use super::*;
+
+    #[test]
+    fn test_site_map() {
+        prepare_freethreaded_python();
+
+        Python::with_gil(|py| {
+            let set = PySet::empty(py).expect("failed to initialized set");
+
+            site_map(py, "https://rust-exercises.com".to_string(), set.clone())
+                .expect("site_map returned unexpected error");
+
+            assert!(set.len() >= 200);
+        });
+    }
 }
